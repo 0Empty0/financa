@@ -4,7 +4,6 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <stdbool.h>
-#include <errno.h>
 
 #define INITIAL_EVENT_CAPACITY 64
 
@@ -69,7 +68,7 @@ int event_loop_add(event_loop_t *loop, int fd, short events, void *data, event_c
     {
         nfds_t new_capacity = loop->capacity * 2;
 
-        event_t *new_events = realloc(loop->events, sizeof(event_t) * loop->capacity);
+        event_t *new_events = realloc(loop->events, sizeof(event_t) * new_capacity);
 
         if (new_events == NULL)
             return -1;

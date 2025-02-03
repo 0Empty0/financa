@@ -10,11 +10,22 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 
+#define INITIAL_ROUTE_CAPACITY 64
+typedef struct route
+{
+	char *path;
+	void *data;
+	http_route_callback_t callback;
+} route_t;
+
 struct http_server
 {
 	event_loop_t *loop;
 	int listen_fd;
 	int port;
+	route_t *routes;
+	size_t route_count;
+	size_t route_capacity;
 };
 
 static int set_nonblocking(int fd)
@@ -69,26 +80,42 @@ static void http_client_callback(int fd, short events, void *data)
 	buffer[n] = '\0';
 	printf("Received request:\n%s\n", buffer);
 
-	const char *response =
-			"HTTP/1.1 200 OK\r\n"
+	char method[256], path[8192], protocol[256];
+	if (sscanf(buffer, "%255s %8191s %255s", method, path, protocol) != 3)
+	{
+		const char *bad_response =
+				"HTTP/1.1 400 Bad Request\r\n"
+				"Content-Type: text/plain\r\n"
+				"Content-Length: 11\r\n"
+				"\r\n"
+				"Bad Request";
+
+		write(fd, bad_response, strlen(bad_response));
+		event_loop_remove(server->loop, fd);
+		close(fd);
+		return;
+	}
+
+	for (size_t i = 0; i < server->route_count; i++)
+	{
+		if (strcmp(path, server->routes[i].path) == 0)
+		{
+			// Note: the callback is expected to handle writing the response
+			// and closing the connection.
+			// TODO: make callback receive request and response, so this func will handle writing
+			server->routes[i].callback(fd, buffer, server->routes[i].data);
+			return;
+		}
+	}
+
+	const char *not_found_response =
+			"HTTP/1.1 404 Not Found\r\n"
 			"Content-Type: text/plain\r\n"
 			"Content-Length: 13\r\n"
 			"\r\n"
-			"Hello, World!";
-	ssize_t total_written = 0;
-	ssize_t response_len = strlen(response);
-	while (total_written < response_len)
-	{
-		ssize_t written = write(fd, response + total_written, response_len - total_written);
-		if (written < 0)
-		{
-			if (errno == EAGAIN || errno == EWOULDBLOCK)
-				continue;
-			perror("write");
-			break;
-		}
-		total_written += written;
-	}
+			"404 Not Found";
+
+	write(fd, not_found_response, strlen(not_found_response));
 	event_loop_remove(server->loop, fd);
 	close(fd);
 }
@@ -152,15 +179,73 @@ http_server_t *http_server_create(event_loop_t *loop, int port)
 
 	printf("HTTP server listening on port %d\n", port);
 
+	server->route_count = 0;
+	server->route_capacity = INITIAL_ROUTE_CAPACITY;
+	server->routes = malloc(sizeof(struct route) * server->route_capacity);
+
+	if (server->routes == NULL)
+	{
+		perror("routes");
+		close(server->listen_fd);
+		free(server);
+		return NULL;
+	}
+
 	return server;
 }
 
 void http_server_destroy(http_server_t *server)
 {
-	if (server != NULL)
+	if (server == NULL)
 	{
-		event_loop_remove(server->loop, server->listen_fd);
-		close(server->listen_fd);
-		free(server);
+		return;
 	}
+
+	event_loop_remove(server->loop, server->listen_fd);
+	close(server->listen_fd);
+	for (size_t i = 0; i < server->route_count; i++)
+	{
+		free(server->routes[i].path);
+	}
+	free(server->routes);
+	free(server);
+}
+
+int http_server_add_route(http_server_t *server, const char *path,
+													void *data, http_route_callback_t callback)
+{
+	if (server == NULL || path == NULL || callback == NULL)
+	{
+		return -1;
+	}
+
+	if (server->route_count == server->route_capacity)
+	{
+		size_t new_capacity = server->route_capacity * 2;
+
+		route_t *new_routes = realloc(server->routes, sizeof(route_t) * new_capacity);
+
+		if (new_routes == NULL)
+		{
+			perror("realloc");
+			return -1;
+		}
+
+		server->routes = new_routes;
+		server->route_capacity = new_capacity;
+	}
+
+	server->routes[server->route_count].path = strdup(path);
+
+	if (server->routes[server->route_count].path == NULL)
+	{
+		perror("path");
+		return -1;
+	}
+
+	server->routes[server->route_count].data = data;
+	server->routes[server->route_count].callback = callback;
+	server->route_count++;
+
+	return 0;
 }

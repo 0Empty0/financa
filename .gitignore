@@ -53,6 +53,7 @@ dkms.conf
 
 # Local files
 .idea
+.vscode
 cmake-build-debug
 
 #env
